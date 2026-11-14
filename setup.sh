@@ -10,4 +10,4 @@ fi
 npm --prefix frontend ci
 npm --prefix frontend run build
 .venv/bin/python scripts/prepare_corpus.py
-printf '%s\n' 'Setup complete. Ensure the two local Ollama models are available, then run ./start.sh.'
+printf '%s\n' 'Setup complete. Ensure llama-server is running on ports 8081 (chat) and 8080 (embeddings), then run ./start.sh.'

@@ -36,24 +36,43 @@ class EmbedRequest(BaseModel):
 
 app = FastAPI(title="裁研 LiteLLM local gateway", dependencies=[Depends(auth)])
 
+def server_model(endpoint, configured):
+    parsed = urlparse(endpoint)
+    if parsed.scheme not in ("http", "https") or parsed.hostname not in ("127.0.0.1", "localhost", "::1"):
+        raise HTTPException(503, "This POC only permits loopback model endpoints")
+    r = httpx.get(endpoint + "/models", timeout=4, trust_env=False)
+    r.raise_for_status()
+    models = [m["id"] for m in r.json()["data"]]
+    if configured:
+        if configured not in models:
+            raise ValueError("Configured model is not served")
+        return configured
+    if len(models) != 1 or not isinstance(models[0], str) or not models[0]:
+        raise ValueError("Expected one model; configure its ID explicitly")
+    return models[0]
+
+
 def profile():
-    if urlparse(settings.OLLAMA).hostname not in ("127.0.0.1", "localhost", "::1"):
-        raise HTTPException(503, "This POC only permits loopback Ollama endpoints")
     try:
-        r = httpx.get(settings.OLLAMA+"/api/tags", timeout=4, trust_env=False)
-        r.raise_for_status()
-        by_name = {m["name"]: m for m in r.json()["models"]}
-        result = {"chat": {"alias": settings.MODEL_ALIAS, "model": settings.MODEL, "digest": by_name[settings.MODEL]["digest"]},
-                  "embedding": {"alias": settings.EMBED_ALIAS, "model": settings.EMBED_MODEL, "digest": by_name[settings.EMBED_MODEL]["digest"], "dimensions": settings.DIMENSIONS},
-                  "gateway": "litellm-1.101.0", "endpoint": settings.OLLAMA, "retries": 0, "cloud_fallback": False}
-        frozen = settings.DATA / "model-profile.json"
+        result = {
+            "chat": {"alias": settings.MODEL_ALIAS,
+                     "model": server_model(settings.CHAT_API_BASE, settings.CHAT_SERVER_MODEL),
+                     "endpoint": settings.CHAT_API_BASE},
+            "embedding": {"alias": settings.EMBED_ALIAS,
+                          "model": server_model(settings.EMBED_API_BASE, settings.EMBED_SERVER_MODEL),
+                          "endpoint": settings.EMBED_API_BASE, "dimensions": settings.DIMENSIONS},
+            "provider": "openai-compatible", "retries": 0, "cloud_fallback": False,
+        }
+        # Separate backend profile preserves the previous Ollama provenance.
+        # /models exposes IDs, not weight digests; this pins routing, not weights.
+        frozen = settings.DATA / "model-profile-openai.json"
         if frozen.exists() and json.loads(frozen.read_text()) != result:
-            raise HTTPException(503, "本地模型映射已变化，请核对后创建新版本配置。")
+            raise HTTPException(503, "Model routing changed; review model-profile-openai.json before restarting.")
         if not frozen.exists():
             frozen.write_text(json.dumps(result, ensure_ascii=False, indent=2))
         return result
-    except (httpx.HTTPError, KeyError):
-        raise HTTPException(503, "Ollama 或批准的 Qwen 模型不可用。")
+    except (httpx.HTTPError, KeyError, ValueError, TypeError):
+        raise HTTPException(503, "Local model server unavailable or model discovery failed.")
 
 @app.get("/health")
 def health():
@@ -66,11 +85,11 @@ async def chat(req: ChatRequest):
     # Conservative Chinese character bound; no silent truncation.
     if sum(len(m.get("content", "")) for m in req.messages) > 15000:
         raise HTTPException(413, "模型上下文超过本 POC 的字符预算，请分批。")
-    profile()
+    current = profile()
     async with gate:
         try:
-            response = await litellm.acompletion(model="ollama_chat/"+settings.MODEL, api_base=settings.OLLAMA,
-                messages=req.messages, temperature=0, max_tokens=req.max_tokens, num_ctx=16384,
+            response = await litellm.acompletion(model="openai/"+current["chat"]["model"], api_base=settings.CHAT_API_BASE, api_key="local",
+                messages=req.messages, temperature=0, max_tokens=req.max_tokens,
                 response_format={"type":"json_schema","json_schema":{"name":"caiyan_artifact","schema":req.output_schema}} if req.output_schema else {"type": "json_object"}, timeout=240, num_retries=0, stream=False)
             result = response.model_dump()
             if result["choices"][0]["finish_reason"] != "stop":
@@ -85,14 +104,21 @@ async def chat(req: ChatRequest):
 async def embedding(req: EmbedRequest):
     if req.model != settings.EMBED_ALIAS:
         raise HTTPException(422, "未批准的嵌入别名")
-    profile()
+    current = profile()
     async with gate:
         try:
-            response = await litellm.aembedding(model="ollama/"+settings.EMBED_MODEL, api_base=settings.OLLAMA,
-                input=[req.input], dimensions=settings.DIMENSIONS, truncate=False, timeout=120, num_retries=0)
+            response = await litellm.aembedding(model="openai/"+current["embedding"]["model"], api_base=settings.EMBED_API_BASE, api_key="local",
+                input=[req.input], dimensions=settings.DIMENSIONS, allowed_openai_params=["dimensions"], encoding_format="float", timeout=120, num_retries=0)
             vector = np.asarray(response.data[0]["embedding"], dtype=np.float32)
+            # Qwen3-Embedding-4B supports MRL prefix reduction. Some llama.cpp
+            # versions ignore dimensions and return the full 2560-vector.
+            model_id = current["embedding"]["model"].lower()
+            if vector.shape == (2560,) and "qwen3-embedding-4b" in model_id:
+                if not np.isfinite(vector).all():
+                    raise ValueError("Invalid embedding")
+                vector = vector[:settings.DIMENSIONS]
             norm = float(np.linalg.norm(vector))
-            if len(vector) != settings.DIMENSIONS or not np.isfinite(norm) or norm == 0:
+            if vector.shape != (settings.DIMENSIONS,) or not np.isfinite(norm) or norm == 0:
                 raise ValueError("Invalid embedding")
             return {"model": settings.EMBED_ALIAS, "data": [{"index": 0, "embedding": (vector/norm).tolist()}]}
         except Exception as exc:

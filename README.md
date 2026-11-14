@@ -1,28 +1,31 @@
 # 裁研 · 通用住房纠纷研究 POC
 
-React + FastAPI + LangGraph + LiteLLM + 本地 Qwen/Ollama。复用既有 `index_50k` 的 SQLite 全文和 Qdrant 向量，提供案件材料上传、事实整理、证据分析、类案研究、民事起诉状与代理意见草稿、编辑复核和 Markdown 导出。
+React + FastAPI + LangGraph + LiteLLM + 本地 Qwen/llama.cpp。复用既有 `index_50k` 的 SQLite 全文和 Qdrant 向量，提供案件材料上传、事实整理、证据分析、类案研究、民事起诉状与代理意见草稿、编辑复核和 Markdown 导出。
 
 **珠海未完工楼盘案仅是验收样例。** 服务端没有该案的城市、当事人、金额、日期、案号或预设答案。代理立场、诉求、材料和选中案例都是案件输入。同一流程可用于商品房交付/质量/办证、二手房履行、租赁等争议；不同领域的法律适用仍需律师审核。
 
 ## 本机直接运行
 
 ```sh
-cd /Users/cheny39/Documents/judger/chatbot-system-poc-1106
+cd /Users/jonkiky/Documents/judger-demo
 ./start.sh
 ```
 
 打开 <http://127.0.0.1:8765>。登录信息在 `data/local-credentials.json`，首次初始化随机生成，权限为 600。不要把该文件、`data/internal.key`、案卷数据或 `.env` 提交到版本库。
 
-运行前须有本机 Ollama 服务及这两个已安装模型：
+运行前须启动两个本机 llama-server：生成服务 `http://127.0.0.1:8081/v1`、嵌入服务 `http://127.0.0.1:8080/v1`。应用网关仍使用 LiteLLM SDK，改用 OpenAI-compatible provider；无需单独启动 LiteLLM Proxy 或 Ollama。
 
-- 生成：`qwen3:4b-instruct`，固定别名 `caiyan-qwen4b-r1`。
-- 嵌入：`qwen3-embedding:4b`，512 维，固定别名 `caiyan-embedding4b-r1`。
+- 生成：Qwen3-4B-Instruct-2507，建议服务端 `-c 16384`。
+- 嵌入：Qwen3-Embedding-4B，必须返回与原索引兼容的 512 维向量。网关请求 `dimensions=512` 并归一化；若服务器忽略维度参数并返回 2560 维，网关仅对 ID 含 `Qwen3-Embedding-4B` 的模型执行 MRL 前 512 维截取并重新归一化；其他异常维度会被拒绝。GGUF 量化变化也可能影响检索兼容性，需要核对原索引。
+- 默认从每台服务器的 `/v1/models` 自动发现唯一模型 ID。多模型时设置 `CAIYAN_CHAT_MODEL` / `CAIYAN_EMBED_MODEL` 为实际 ID。
+- 可用 `CAIYAN_CHAT_API_BASE` / `CAIYAN_EMBED_API_BASE` 覆盖地址（包含 `/v1`，仅限 loopback）。
+- 路由配置首次保存到 `data/model-profile-openai.json`；旧 `data/model-profile.json` 保留。新配置固定 ID 与端点，不验证权重 digest。更换模型前核对兼容性，备份并移走新配置文件后重启以重新记录。
 
-模型 digest、别名和服务映射写入 `data/model-profile.json`。映射变化时调用失败，不能静默更换权重。无云端模型兜底。`Ctrl+C` 停止此次启动的四个子进程；任务与检查点仍保留。不要同时启动第二套进程占用相同端口或同一个 Qdrant 目录。
+`./start.sh` 启动网关、检索、API 和 worker；不会启动模型服务器。浏览器打开 `http://127.0.0.1:8765`。`Ctrl+C` 停止此次启动的四个子进程。
 
 ## 在新环境安装
 
-需要 Python 3.11+（本机实测 3.12）、支持 FTS5 的 SQLite、Node.js 20.19+ / 22.12+、npm、Ollama。首次安装会下载 Python/npm 依赖。
+需要 Python 3.11+（本机实测 3.12）、支持 FTS5 的 SQLite、Node.js 20.19+ / 22.12+、npm、llama-server。首次安装会下载 Python/npm 依赖。
 
 ```sh
 ./setup.sh
@@ -31,7 +34,7 @@ cd /Users/cheny39/Documents/judger/chatbot-system-poc-1106
 
 `setup.sh` 使用本目录 `.venv` 和 `frontend/node_modules`。可设置 `POC_PYTHON=/path/to/python3`。已有虚拟环境不会被删除。
 
-默认原始索引路径为相邻目录 `../judgment_research_poc/index_50k`。可通过 `CAIYAN_INDEX_DIR` 指定其他位置，但必须仍是相同模型、维度与结构的完整索引。`CAIYAN_DATA_DIR` 可切换整套本地工作数据目录。数据快照约 1.1 GB，原索引和 Ollama 模型不重复打包进源码。
+默认原始索引路径为相邻目录 `../judgment_research_poc/index_50k`。可通过 `CAIYAN_INDEX_DIR` 指定其他位置，但必须仍是相同模型、维度与结构的完整索引。`CAIYAN_DATA_DIR` 可切换整套本地工作数据目录。数据快照约 1.1 GB，原索引和 GGUF 模型不重复打包进源码。
 
 ## 使用流程
 
@@ -109,7 +112,8 @@ flowchart LR
   Search --> Qdrant[(83,353 向量片段)]
   Worker --> Gateway[LiteLLM 网关 :8766]
   Search --> Gateway
-  Gateway --> Ollama[本机 Ollama :11434]
+  Gateway --> Chat[生成 llama-server :8081]
+  Gateway --> Embedding[嵌入 llama-server :8080]
 ```
 
 API 契约：运行后访问 <http://127.0.0.1:8765/docs> 或 `docs/openapi.json`。Swagger 文档受页面 CSP 限制时可查看 JSON 契约；业务 UI 不依赖 CDN。
