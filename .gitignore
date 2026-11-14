@@ -1,0 +1,84 @@
+# Local case data: credentials, uploads, databases, corpus snapshots, and logs
+data/
+
+# Environment settings and private keys (keep shareable templates)
+.env
+.env.*
+!.env.example
+!.env.sample
+!.env.template
+!.env.*.example
+!.env.*.sample
+!.env.*.template
+.envrc
+local-credentials*.json
+internal.key
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Local databases, including SQLite journals and WAL/shared-memory files
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+*.db
+*.db-*
+
+# Python environments, bytecode, caches, and package metadata
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+*.egg-info/
+
+# JavaScript dependencies, build outputs, and caches
+node_modules/
+.npm/
+.npm-cache/
+.vite/
+dist/
+build/
+*.tsbuildinfo
+
+# Test coverage and browser-test outputs
+.coverage
+.coverage.*
+coverage/
+coverage.xml
+htmlcov/
+test-results/
+playwright-report/
+blob-report/
+**/playwright/.cache/
+
+# Generated evaluation runs, exports, screenshots, and rendered documents
+# These can contain case content and machine-specific session details.
+/evaluation/*
+# Keep reusable fictional test fixtures and public source texts.
+!/evaluation/samples/
+!/evaluation/civil-official.txt
+!/evaluation/housing-official.txt
+
+# Runtime logs, process files, and temporary editor files
+*.log
+*.log.*
+*.pid
+*.pid.lock
+*.tmp
+*.swp
+*.swo
+*~
+
+# Local OS and editor settings
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
